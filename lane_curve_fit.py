@@ -78,9 +78,14 @@ class Img_Sub():
         self.lane_mask = self.bridge.imgmsg_to_cv2(msg, "mono8")
         self.lane_mask_ok = True
 
-def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pub):
+def main(curve_pub,curve_stutus_pub,curve_poly_pub,line_points_pub):
     img_sub = Img_Sub()
-    rate = rospy.Rate(10)
+    rate = rospy.Rate(rospy.get_param('~det_rate',3))
+    fit_threshold = rospy.get_param('~fit_threshold',3000)
+    fit_exist = rospy.get_param('~fit_exist',0.8)
+    offset = rospy.get_param('~bezier_offset',3)
+    path_type = rospy.get_param('~path_type','bezier')
+    segment = 5
     while not (img_sub.lane_pred_ok and img_sub.lane_main_ok and img_sub.lane_exist_ok and img_sub.lane_mask_ok):
         time.sleep(0.2)
         continue
@@ -110,7 +115,7 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
 
         # Otsu's thresholding after Gaussian filtering ------------
         _,main_mask = cv2.threshold(pred_main[:,:,1],0,255,cv2.THRESH_OTSU)
-        dist_main_mask = cv2.distanceTransform(main_mask*pred_main[:,:,1],cv2.DIST_L1, 5)
+        # dist_main_mask = cv2.distanceTransform(main_mask*pred_main[:,:,1],cv2.DIST_L1, 5)
         # Boundary caculate ---------------------------------------
         # Find line point from boundary of drive area
         main_mask_dilate = cv2.dilate(main_mask.copy(),kernel)
@@ -148,6 +153,7 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
         main_mask_top_slice = main_mask.copy()
         main_mask_top_slice[height-mask_height+20:] = 0
         top_center = np.array(ndimage.measurements.center_of_mass(main_mask_top_slice)).astype(int)
+        center_mass = np.array(ndimage.measurements.center_of_mass(main_mask)).astype(int)
         # plt.imshow(main_mask_top_slice)
         # plt.show()
         print('-------------')
@@ -162,7 +168,7 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
         sample = np.zeros(pred_lane_gray.shape).flatten()
         p_left = (pred_lane[:,:,1].flatten().astype(float)/pred_lane[:,:,1].astype(float).sum())
         p_right = (pred_lane[:,:,2].flatten().astype(float)/pred_lane[:,:,2].astype(float).sum())
-        # print(pred_lane[:,:,0].astype(float).sum())
+
         ss_left = []
         ss_right =  []
         lane_status = [1,1]
@@ -184,7 +190,7 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
         sample = sample.reshape(pred_lane_gray.shape)
         boundary[boundary>1]=1
         filter_sample = sample * boundary
-        
+        # filter_sample = sample.copy()
 
 
         y = np.arange(int(300),height-10,30)
@@ -196,9 +202,9 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
         # print("Number_left {}".format(num_fit_left_point))
         # print("num_fit_right_point {}".format(num_fit_right_point))
         
-        
-        tmp = np.zeros(pred_lane.shape,dtype=np.uint8)
-        if lane_status[0] and lane_exist[1]>0.8 and num_fit_left_point>80:
+        c_right , c_left = [0,0,0,0],[0,0,0,0]
+        img_polyline = np.zeros(pred_lane.shape,dtype=np.uint8)
+        if lane_status[0] and lane_exist[1]>fit_exist and num_fit_left_point>fit_threshold:
             
             c_left = np.polyfit(left_y,left_x,2)
             poly_left = np.poly1d(c_left)
@@ -210,8 +216,8 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
             pts[:,0,0] = left_x.astype(int)
             pts[:,0,1] = y
         
-            cv2.polylines(tmp,[pts],False,(255,0,0),8)
-        if lane_status[1] and lane_exist[2]>0.8 and num_fit_right_point>80:
+            cv2.polylines(img_polyline,[pts],False,(255,0,0),8)
+        if lane_status[1] and lane_exist[2]>fit_exist and num_fit_right_point>fit_threshold:
 
             
             c_right = np.polyfit(right_y,right_x,2)
@@ -223,20 +229,14 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
             pts = np.zeros((len(y),1,2),dtype=int)
             pts[:,0,0] = right_x.astype(int)
             pts[:,0,1] = y
-        
-            cv2.polylines(tmp,[pts],False,(0,255,0),8)
-
-        # Distance Transform  ----------------------------------
-        dist_main_mask = dist_main_mask.astype(np.uint8)
-
-
-        ret, sure_fg = cv2.threshold(dist_main_mask,0.9*dist_main_mask.max(),255,0)
-
-        
-
-        ret, course_fg = cv2.threshold(dist_main_mask,0.3*dist_main_mask.max(),255,0)
-        center_mass = np.array(ndimage.measurements.center_of_mass(course_fg)).astype(int)
-
+            
+            cv2.polylines(img_polyline,[pts],False,(0,255,0),8)
+        cv2.putText(img_polyline,"L:{}".format(num_fit_left_point),(20,50),cv2.FONT_HERSHEY_SIMPLEX,1.5, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img_polyline,"C:{}".format(round(lane_exist[1],2)),(20,100),cv2.FONT_HERSHEY_SIMPLEX,1.5, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img_polyline,"K:{}".format(round(c_left[0],4)),(20,150),cv2.FONT_HERSHEY_SIMPLEX,1.5, (0, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(img_polyline,"R:{}".format(num_fit_right_point),(800,50),cv2.FONT_HERSHEY_SIMPLEX,1.5, (255, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(img_polyline,"C:{}".format(round(lane_exist[2],2)),(800,100),cv2.FONT_HERSHEY_SIMPLEX,1.5, (255, 0, 255), 2, cv2.LINE_AA)
+        cv2.putText(img_polyline,"K:{}".format(round(c_right[0],4)),(800,150),cv2.FONT_HERSHEY_SIMPLEX,1.5, (255, 0, 255), 2, cv2.LINE_AA)
 
         # Draw vis plot
         lane_vis = np.zeros(pred_lane.shape,dtype=np.uint8)
@@ -248,39 +248,47 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
 
         # -----------------
 
+        print('path_type--------------',path_type)
+        if path_type == 'bezier':
+
+            # bezier planner  -------------------------
+            start_x = float(1024/2.0 )  # [m]
+            start_y = float(570.)  # [m]
 
 
+            diff = (center_mass[1]-start_x,center_mass[0]-start_y)
+            angle = np.angle([diff[0]+diff[1]*1j])[0]
+            start_yaw = angle  # [rad]
 
-        # Linear Binary classifier -------------------------
-        
-    
-        start_x = float(1024/2.0 )  # [m]
-        start_y = float(570.)  # [m]
+            
+            end_x = float(top_center[1])  # [m]
+            end_y = float(top_center[0])  # [m]
+            
+            diff = (end_x - center_mass[1],end_y - center_mass[0])
+            angle_ = np.angle([diff[0]+diff[1]*1j])[0]
+            end_yaw = angle_  # [rad]
+            
 
-        
-        diff = (center_mass[1]-start_x,center_mass[0]-start_y)
-        angle = np.angle([diff[0]+diff[1]*1j])[0]
-        start_yaw = angle  # [rad]
+            path, control_points = calc_4points_bezier_path(
+                start_x, start_y, start_yaw, end_x, end_y, end_yaw, offset)
+        elif path_type =='bspline':
+            y_min = int(stats[largest_label,cv2.CC_STAT_TOP])
+            center_mass_list = []
+            delta_y = int(mask_height // segment)
+            delta = 10
+            n_course_point = 100  # sampling number
+            for j in range(segment):
+                main_mask_segment = main_mask.copy()
+                main_mask_segment[:y_min+j*delta_y,:]=0
+                main_mask_segment[y_min+(j+1)*delta_y:,:]=0
+                
+                center_mass = np.array(ndimage.measurements.center_of_mass(main_mask_segment))
+                center_mass_list.append(np.array([center_mass[1],center_mass[0]]))
+            waypoint_x = list(np.array(center_mass_list)[:,0])
+            waypoint_y = list(np.array(center_mass_list)[:,1])
+            rax, ray = approximate_b_spline_path(waypoint_x, waypoint_y,n_course_point,degree=3)
+            path = np.stack((rax, ray)).T
 
-        
-        
-        end_x = float(top_center[1])  # [m]
-        end_y = float(top_center[0])  # [m]
-        
-        diff = (end_x - center_mass[1],end_y - center_mass[0])
-        angle_ = np.angle([diff[0]+diff[1]*1j])[0]
-        end_yaw = angle_  # [rad]
-        offset = 3.0
-        
-    
-
-        # Plot start and end control point ---------------------------------------
-        cv2.circle(dist_main_mask,(int(center_mass[1]),int(center_mass[0])),5,255,3)
-        cv2.circle(dist_main_mask,(int(end_x),int(end_y)),5,255,3)
-        cv2.circle(dist_main_mask,(int(start_x),int(start_y)),5,255,3)
-
-        path, control_points = calc_4points_bezier_path(
-            start_x, start_y, start_yaw, end_x, end_y, end_yaw, offset)
 
         mid_point = path.flatten().tolist()
         msg_midpoint = Float32MultiArray()
@@ -296,10 +304,10 @@ def main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pu
         status_msg.data = lane_status
 
         
-        curve_dist_pub.publish(bridge.cv2_to_imgmsg(dist_main_mask.astype(np.uint8),'mono8'))
+
         curve_stutus_pub.publish(status_msg)
         curve_pub.publish(bridge.cv2_to_imgmsg(lane_vis,'bgr8'))
-        curve_poly_pub.publish(bridge.cv2_to_imgmsg(tmp,'bgr8'))
+        curve_poly_pub.publish(bridge.cv2_to_imgmsg(img_polyline,'bgr8'))
         stop = time.time()
         print("Time: {}".format(stop-start))
         rate.sleep()
@@ -310,9 +318,8 @@ if __name__ == "__main__":
     curve_pub = rospy.Publisher("Curve/lane", Image)
     curve_poly_pub = rospy.Publisher("Curve/line_poly", Image)
     curve_stutus_pub = rospy.Publisher("Curve/status", Int32MultiArray)
-    curve_dist_pub = rospy.Publisher("Curve/dist", Image)
     line_points_pub = rospy.Publisher("Drive/main_point", Float32MultiArray)
-    main(curve_pub,curve_stutus_pub,curve_poly_pub,curve_dist_pub,line_points_pub)
+    main(curve_pub,curve_stutus_pub,curve_poly_pub,line_points_pub)
 
 
 
